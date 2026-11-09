@@ -77,6 +77,26 @@ The Sony RMT-P1BT protocol uses GATT Service `8000FF00-FF00-FFFF-FFFF-FFFFFFFFFF
   * Sony Company Identifier: `0x012D` in BLE Manufacturer Specific Data.
   * Filters non-Sony peripherals during scanning.
 
+### Firmware Implementation (`firmware/BLE camera control/`)
+* **PlatformIO Environment:** `adafruit_feather_esp32s3` with LittleFS, PSRAM, and native USB CDC.
+* **Display & Physical Controls (FeatherWing OLED 128x32):**
+  * `BUTTON_A` (GPIO 9): Start stacking sweep / Cancel running sweep / Start BLE scan if disconnected.
+  * `BUTTON_B` (GPIO 6): Short press = Single shutter trigger; Long press (>600ms) = Focus Far (-100ms).
+  * `BUTTON_C` (GPIO 5): Short press = Focus Near (+100ms); Long press (>600ms) = Focus Far (-100ms).
+  * 128x32 OLED provides real-time connection telemetry, parameter display, and slice progress bar.
+* **USB-CDC Serial Console Interface:**
+  * `RUN [range_mm] [frames] [ruler_cm]`: Trigger sweep with active or specified parameters.
+  * `SET [range_mm] [frames] [ruler_cm]`: Update parameters without triggering.
+  * `SHUTTER` / `SNAP`: Trigger camera exposure.
+  * `NEAR [ms]` / `FAR [ms]`: Nudge focus near/far.
+  * `SCAN`: Restart camera discovery scan.
+  * `STOP`: Abort running stack.
+  * `HELP`: Display command summary.
+* **Flash Storage & Logging (`LittleFS`):**
+  * `macro_calibration.csv`: Embedded LittleFS stores calibrated ms/mm mapping curve with linear interpolation.
+  * `stacker.log`: Persistent timestamped command and output logging (`[HH:MM:SS.mmm] [TAG] message`) with automatic log rotation at 64 KB (`stacker.log.old`).
+  * Serial Log Tools: `LOG` / `DUMP_LOG` (read out log file), `CLEAR_LOG` (truncate/erase), `LOG_STATUS` (file size and flash space).
+
 ---
 
 ## 5. Architectural Comparison Summary
