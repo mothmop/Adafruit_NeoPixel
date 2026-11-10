@@ -10,6 +10,7 @@
 #include <BLEUtils.h>
 #include <BLEClient.h>
 #include <BLE2902.h>
+#include <BLESecurity.h>
 
 // ============================================================================
 // Hardware & Display Configuration (FeatherWing OLED 128x32)
@@ -75,7 +76,7 @@ void getTimestampStr(char* buffer, size_t maxLen) {
     uint32_t s = sec_total % 60;
     uint32_t m = (sec_total / 60) % 60;
     uint32_t h = sec_total / 3600;
-    snprintf(buffer, maxLen, "[%02u:%02u:%02u.%03u]", h, m, s, ms);
+    snprintf(buffer, maxLen, "[%02lu:%02lu:%02lu.%03lu]", (unsigned long)h, (unsigned long)m, (unsigned long)s, (unsigned long)ms);
 }
 
 void logMessage(const char* tag, const char* format, ...) {
@@ -148,9 +149,9 @@ void printLogStatus() {
     }
     size_t used = fsReady ? LittleFS.usedBytes() : 0;
     size_t total = fsReady ? LittleFS.totalBytes() : 0;
-    logMessage("LOG", "Log Size: %u / %u bytes | LittleFS Total: %u KB, Used: %u KB",
-               (unsigned int)curSize, (unsigned int)MAX_LOG_SIZE,
-               (unsigned int)(total / 1024), (unsigned int)(used / 1024));
+    logMessage("LOG", "Log Size: %lu / %lu bytes | LittleFS Total: %lu KB, Used: %lu KB",
+               (unsigned long)curSize, (unsigned long)MAX_LOG_SIZE,
+               (unsigned long)(total / 1024), (unsigned long)(used / 1024));
 }
 
 // ============================================================================
@@ -499,6 +500,7 @@ class SecurityCallback : public BLESecurityCallbacks {
     void onPassKeyNotify(uint32_t pass_key) override {}
     bool onConfirmPIN(uint32_t pass_key) override { return true; }
     bool onSecurityRequest() override { return true; }
+#if defined(CONFIG_BLUEDROID_ENABLED)
     void onAuthenticationComplete(esp_ble_auth_cmpl_t cmpl) override {
         if (cmpl.success) {
             logMessage("BLE", "Authentication & Bonding Succeeded");
@@ -506,6 +508,15 @@ class SecurityCallback : public BLESecurityCallbacks {
             logMessage("BLE", "Authentication Failed (Reason: %d)", cmpl.fail_reason);
         }
     }
+#elif defined(CONFIG_NIMBLE_ENABLED)
+    void onAuthenticationComplete(ble_gap_conn_desc* desc, int status) override {
+        if (status == 0) {
+            logMessage("BLE", "Authentication & Bonding Succeeded");
+        } else {
+            logMessage("BLE", "Authentication Failed (Status: %d)", status);
+        }
+    }
+#endif
 };
 
 class ClientCallback : public BLEClientCallbacks {
@@ -527,7 +538,7 @@ class AdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
 
         // Check BLE Manufacturer Specific Data for Sony Corporation Company ID (0x012D)
         if (advertisedDevice.haveManufacturerData()) {
-            std::string mfg = advertisedDevice.getManufacturerData();
+            String mfg = advertisedDevice.getManufacturerData();
             if (mfg.length() >= 2) {
                 // Bluetooth SIG Company ID is stored in little-endian byte order
                 uint16_t companyId = ((uint8_t)mfg[1] << 8) | (uint8_t)mfg[0];
@@ -597,7 +608,7 @@ bool connectToCamera() {
         updateDisplay("Connect Failed");
         return false;
     }
-    pClient->setEncryptionLevel(ESP_BLE_SEC_ENCRYPT_MITM);
+    pClient->secureConnection();
 
     BLERemoteService* pRemoteService = pClient->getService(SERVICE_UUID);
     if (!pRemoteService) {
@@ -747,6 +758,21 @@ void handleSerial() {
     else if (line.equalsIgnoreCase("CLEAR_LOG")) {
         clearLog();
     }
+    else if (line.equalsIgnoreCase("TEST_OLED")) {
+        logMessage("OLED", "Running OLED display test pattern...");
+        display.clearDisplay();
+        display.fillScreen(SSD1306_WHITE);
+        display.display();
+        delay(800);
+        display.clearDisplay();
+        display.drawRect(0, 0, 128, 32, SSD1306_WHITE);
+        display.setTextSize(2);
+        display.setTextColor(SSD1306_WHITE);
+        display.setCursor(10, 8);
+        display.print(F("STACKER"));
+        display.display();
+        logMessage("OLED", "Test pattern displayed on OLED");
+    }
     else if (line.equalsIgnoreCase("LOG_STATUS")) {
         printLogStatus();
     }
@@ -782,19 +808,59 @@ void setup() {
     pinMode(BUTTON_B, INPUT_PULLUP);
     pinMode(BUTTON_C, INPUT_PULLUP);
 
-    // Initialize display on standard I2C pins
-    if (display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    // Ensure I2C power is turned on (Feather ESP32-S3 LDO)
+#ifdef PIN_I2C_POWER
+    pinMode(PIN_I2C_POWER, OUTPUT);
+    digitalWrite(PIN_I2C_POWER, HIGH);
+    delay(50);
+#endif
+
+    Wire.begin(SDA, SCL);
+    delay(50);
+
+    // Scan I2C bus for display
+    logMessage("I2C", "Scanning I2C bus (SDA: pin %d, SCL: pin %d)...", SDA, SCL);
+    uint8_t foundCount = 0;
+    bool found3C = false;
+    bool found3D = false;
+    for (uint8_t addr = 1; addr < 127; ++addr) {
+        Wire.beginTransmission(addr);
+        uint8_t error = Wire.endTransmission();
+        if (error == 0) {
+            logMessage("I2C", "Found I2C device at address 0x%02X", addr);
+            foundCount++;
+            if (addr == 0x3C) found3C = true;
+            if (addr == 0x3D) found3D = true;
+        }
+    }
+    if (foundCount == 0) {
+        logMessage("WARN", "No I2C devices detected on the bus!");
+    }
+
+    // FeatherWing 128x32 OLED uses 0x3C
+    uint8_t displayAddr = 0x3C;
+    if (!found3C && found3D) {
+        displayAddr = 0x3D;
+    }
+
+    // Initialize display on 0x3C
+    if (display.begin(SSD1306_SWITCHCAPVCC, displayAddr, false, false)) {
         hasDisplay = true;
         display.clearDisplay();
-        display.setTextSize(1);
         display.setTextColor(SSD1306_WHITE);
+        display.setTextSize(1);
         display.setCursor(0, 0);
         display.println(F("Sony a7C Stacker"));
-        display.println(F("Initializing..."));
+        display.setCursor(0, 10);
+        display.println(F("FeatherWing 128x32"));
+        display.setCursor(0, 20);
+        display.println(F("Ready..."));
         display.display();
-        delay(300);
+        logMessage("OLED", "SSD1306 initialized at 0x%02X (128x32)", displayAddr);
+        delay(500);
     } else {
         hasDisplay = false;
+        logMessage("OLED", "SSD1306 begin failed!");
     }
 
     // Initialize LittleFS & Load Calibration
@@ -814,7 +880,6 @@ void setup() {
 
     // Initialize BLE Subsystem
     BLEDevice::init("ESP32-RMT-P1BT");
-    BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT_MITM);
     BLEDevice::setSecurityCallbacks(new SecurityCallback());
 
     BLESecurity* pSecurity = new BLESecurity();
